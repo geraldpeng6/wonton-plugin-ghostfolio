@@ -8,54 +8,94 @@
 #       拼 API 路径用 SMOKE_WEB_ORIGIN（只有 scheme://host:port，入口的路径不掺进来），别直接接在 SMOKE_WEB_URL 后面。
 #
 # 页面：web_assert 从标准输入读页面，命中的确是应用的真实页面时返回 0。
-# 身份：identity_check 只证明身份：用应用自己的“当前用户”接口断言认出的是用户管理员，不碰应用里的数据。
+# 身份：identity_check 只证明身份：用应用自己的"当前用户"接口断言认出的是用户管理员，不碰应用里的数据。
 #       数据断言（是否配置过、有几条、内容对不对）全部交给 data_write / data_check：冒烟第 1 项会先装升级
-#       起点写数据，身份探针再断言“数据目录是空的”就会红。接口回字段时也只看类型（如 configured 是布尔、
+#       起点写数据，身份探针再断言"数据目录是空的"就会红。接口回字段时也只看类型（如 configured 是布尔、
 #       nodes 是数字），值和条数留给 data_check。
 #       没有用户体系时写 IDENTITY_NA=1，并在 SMOKE_NOTE 里写原因。dweb / web_get 是带用户会话的请求助手，可继续走应用自己的登录链。
 #       SSO 登录跳转不用自己写表单逻辑：dweb --sso 会从清单 webui.path 的入口出发（没写就是 /），提交核心
 #       登录页的 JS 自动表单并跟完重定向，返回的页面已带应用的登录态。
 # 工具：MCP_TOOL 写一个只读工具名（可带插件前缀），MCP_ARGS 是 JSON 参数；mcp_assert 从标准输入读调用结果。
 #       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
-# 通知房间：申请了 notify 的插件把通知交给核心，核心以核心账号发进和主人的“Wonton”私聊。
-#       探针以主人身份读这个房间：probes_owner_room_wait <超时秒> <要找的文字> 等到开始之后发来的、包含这段文字的
-#       消息就返回 0，超时列出看到的最新消息并返回非 0。要先把等待挂到后台再发通知，否则消息可能在等待开始前就到：
-#         room_wait() {
-#           local marker="probe-$RANDOM" url
-#           url="$(docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" printenv WONTON_NOTIFY_URL)"
-#           probes_owner_room_wait 120 "$marker" & local pid=$!
-#           docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" wget -q -O /dev/null \
-#             --header 'Content-Type: application/json' --post-data "{\"title\":\"$marker\"}" "$url"
-#           wait "$pid"
-#         }
-#       上面的 web 换成插件里能发 HTTP 的服务；wget 换成那个服务里有的客户端。
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：data_write 用随机标记写
+# 数据：合并前要验证"升级/重装不丢用户数据"时写 data_write 和 data_check（两个都写才跑）：data_write 用随机标记写
 #       一条数据并把标记原样存进 $SMOKE_STATE，data_check 读回标记去应用里找，对不上就打印看到了什么并返回非 0。
 #       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
 # 装之前要准备（如先配出口代理）：写 before_install。
 
-web_assert() { grep -q '你好'; }   # 示例页的标题
+# sso=oidc：打开网页（清单入口 /api/auth/oidc）直跳云吞登录，应用不发自己的会话 Cookie，
+# 登录态是回调最后一跳地址里的 JWT（/<语言>/auth/<jwt>），探针从这里取，之后带 Bearer 调应用自己的接口。
+# 清单没有 mcp：上游自带 MCP，但它的访问令牌只能由主人登录后在应用里创建，装好时给不出值
+# （mcp.headers 要求装好即有值，见 PR 的"底座的问题"）。
+# shellcheck disable=SC2034  # SSO/MCP 由冒烟套件读取
+SSO=oidc
+MCP=0
 
-identity_check() { # 页面回显的就是网关注入的用户名；示例页不存数据，也不拿数据判断身份
-  local page
-  page="$(dweb /)" || { echo "页面失败：$page"; return 1; }
-  grep -qF "你好，$SMOKE_OWNER" <<<"$page" || { echo "页面没回显用户 $SMOKE_OWNER：$(head -c 120 <<<"$page")"; return 1; }
+web_assert() { grep -qi '<title[^>]*>Ghostfolio'; }   # OIDC 走完后落到应用页面（index.html 的标题）
+
+# ---------- 探针内部助手：只用套件保证的变量 ----------
+GF_JWT=""
+
+gf_token() { # 走完 OIDC：核心会话 → 应用 /api/auth/oidc → 核心登录页自动放行 → 回调 → 302 到 /<语言>/auth/<jwt>。
+             # 同一进程缓存；输出 JWT，诊断走标准错误。
+  local jar base_core final jwt
+  jar="${SMOKE_JAR:-}" base_core="${SMOKE_BASE:-}"
+  if [[ -z "$GF_JWT" ]]; then
+    [[ -n "$jar" && -n "$base_core" && -n "${SMOKE_TOKEN:-}" && -n "${SMOKE_WEB_URL:-}" ]] ||
+      { echo "缺冒烟变量：SMOKE_JAR/SMOKE_BASE/SMOKE_TOKEN/SMOKE_WEB_URL" >&2; return 1; }
+    # 核心会话和应用会话都补进 jar：-b 保留已有的 cookie（只写 -c 会抹掉别的域的会话）。
+    curl -sS --noproxy '*' -o /dev/null -b "$jar" -c "$jar" \
+      --data-urlencode "token=$SMOKE_TOKEN" "$base_core/_wonton/login" ||
+      { echo "主人令牌登录不了核心" >&2; return 1; }
+    final="$(curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' \
+      -w '%{url_effective}' "$SMOKE_WEB_URL")" || { echo "OIDC 登录链请求失败" >&2; return 1; }
+    jwt="${final##*/auth/}"
+    [[ -n "$jwt" && "$jwt" != "$final" ]] ||
+      { echo "登录没拿到 JWT（最后一跳是 $final；跳到 /auth 说明 OIDC 失败，看应用日志）" >&2; return 1; }
+    GF_JWT="$jwt"
+  fi
+  printf '%s' "$GF_JWT"
 }
 
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：
-#   data_write 用随机标记写一条数据，把标记原样覆盖写进 $SMOKE_STATE（一个已建好的空文件，不是目录）；data_check 读回标记、去应用里找，
-#   找不到就打印看到了什么并返回非 0。
-# 应用不存用户数据时写 DATA_NA=1（两项记 N/A）。模板的示例页不存数据，所以这里是不适用。
-# 数据要写进插件容器时（Agent 插件的工作区标记等），容器名别自己拼：钩子契约里没有 SMOKE_SLUG，e2e 套件的
-# data_write 又跑在实例名导出之前，拼出来的名字缺段（No such container）；Bot 服务（清单声明了 bots）每个 Bot
-# 一组容器，名字还带 --<Bot 名> 后缀。按核心打的标签找，插件自带 smoke 和 e2e 套件两个运行环境都成立
-# （实例名没导出时按 SMOKE_BASE 的主机名第一段推）：
-#   _container() { # <插件 id> <服务名>：本实例里这个服务的容器
-#     local inst="${SMOKE_INSTANCE:-}" args=(--filter "label=wonton.plugin=$1" --filter "label=wonton.service=$2")
-#     if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
-#       inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
-#     fi
-#     [[ -z "$inst" ]] || args+=(--filter "label=wonton.instance=${inst//-/}")
-#     docker ps --format '{{.Names}}' "${args[@]}" | head -1
-#   }
-export DATA_NA=1
+gf_api() { # <方法> <路径> [JSON 正文]：带应用 JWT 经网关调应用接口，输出响应。
+  local method="$1" path="$2" body="${3:-}" jwt args=()
+  jwt="$(gf_token)" || return 1
+  args=(-sS --noproxy '*' -b "$SMOKE_JAR" -H "Authorization: Bearer $jwt" -X "$method")
+  if [[ -n "$body" ]]; then
+    args+=(-H 'Content-Type: application/json' -d "$body")
+  fi
+  curl "${args[@]}" "$SMOKE_WEB_ORIGIN$path"
+}
+
+identity_check() { # 应用认出的是主人本人：这个 JWT 调得动"当前用户"接口，且应用里只有这一个用户——
+                   # 是刚才这次 OIDC 登录建出来的（provider=OIDC 的管理员）。
+  local me users
+  me="$(gf_api GET /api/v1/user)" || { echo "调 /api/v1/user 失败"; return 1; }
+  jq -e '.id | type == "string" and length > 0' <<<"$me" >/dev/null ||
+    { echo "当前用户接口没认出登录态：$(head -c 200 <<<"$me")"; return 1; }
+  users="$(gf_api GET /api/v1/users)" || { echo "调 /api/v1/users 失败：$users"; return 1; }
+  jq -e '.count == 1 and .users[0].provider == "OIDC" and .users[0].role == "ADMIN"' <<<"$users" >/dev/null ||
+    { echo "应用里的用户不是 OIDC 建的管理员（或不止一个）：$(head -c 300 <<<"$users")"; return 1; }
+}
+
+# 保数据：建一个名字带随机标记的账户，标记写进 $SMOKE_STATE；升级/重装后按 id 读回来核对名字。
+data_write() {
+  local marker out id
+  marker="probe-$(date +%s)-$RANDOM"
+  out="$(gf_api POST /api/v1/accounts \
+    "{\"name\":\"$marker\",\"currency\":\"USD\",\"platformId\":null}")" ||
+    { echo "建账户失败：$out"; return 1; }
+  jq -e --arg m "$marker" '.name == $m and (.id | length > 0)' <<<"$out" >/dev/null ||
+    { echo "创建响应里没有账户：$(head -c 200 <<<"$out")"; return 1; }
+  id="$(jq -r '.id' <<<"$out")"
+  printf 'GF_ACCOUNT_ID=%q\nGF_MARKER=%q\n' "$id" "$marker" > "$SMOKE_STATE"
+}
+
+data_check() {
+  local out
+  # shellcheck source=/dev/null  # SMOKE_STATE 是套件准备的数据标记文件，路径在运行时才有
+  source "$SMOKE_STATE"
+  out="$(gf_api GET /api/v1/accounts)" || { echo "列账户失败：$out"; return 1; }
+  jq -e --arg id "$GF_ACCOUNT_ID" --arg m "$GF_MARKER" \
+    '.accounts[] | select(.id == $id) | .name == $m' <<<"$out" >/dev/null ||
+    { echo "找不到写进去的账户（id=$GF_ACCOUNT_ID 标记=$GF_MARKER）：$(head -c 300 <<<"$out")"; return 1; }
+}

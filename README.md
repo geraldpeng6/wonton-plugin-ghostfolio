@@ -1,43 +1,27 @@
-# 云吞插件模板
+# 投资记账（Ghostfolio）
+
+像证券 App 的收益页：把股票、基金和加密货币的买卖记进来，随时看总资产、每天的涨跌和各持仓的盈亏占比。
 
 开发流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)。
 
-这是一个能安装的示例插件 `app.example.hello`：使用 nginx 官方镜像显示问候页，经网关的 `sso: proxy` 注入用户名，页面显示“你好，<用户名>”。示例没有应用账号、持久化数据或 MCP 工具。
+## 登录
 
-## 示例文件
+登录走云吞的账号（核心的身份提供方）：装好后打开，第一次就自动建好管理员账号，不用在应用里注册或设密码。
 
-| 路径 | 内容 |
-| --- | --- |
-| `docker-compose.yml` | 示例清单、nginx 服务和三个 `configs` |
-| `web/default.conf.template` | nginx 配置，启用 SSI 回显用户名并提供健康检查入口；只放行来自核心地址（`${WONTON_CORE_ADDRESS}`）的请求，其余来源 403 |
-| `web/index.html` | 问候页 |
-| `web/tokens.css` | 页面主题变量的后备值 |
-| `tabs/` | 示例主页的应用页面图标 |
-| `screenshots/home.png` | 商店详情页的示例截图 |
-| `scripts/smoke-probes.sh` | 检查真实页面和网关注入身份的插件探针 |
+## 数据
 
-从模板创建自己的插件后，替换示例清单、网页和素材；具体步骤见[写插件](https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件)。
+全部数据在 Postgres，存放在插件数据目录的 `postgres/` 子目录；卸载时选"删除数据"才一并删除。
 
-## 对着别的栈跑探针
+## 出网
 
-`probes`、`api`、`session` 按 `.wonton/.env` 的 `WONTON_BASE_DOMAIN` 拼核心地址，`up` 起的栈自己写这个键。插件装进别人的栈、或者对着已有环境排查时，把那套栈的基础域名写进 `.wonton/.env`，不要只按实例名猜地址：实例名只是资源名前缀，网关按 Host 认域名，拼错了会回“没有安装”。
+行情价和汇率要访问外网，插件申请了出网权限并经云吞的出网代理。数据源由上游决定：加密货币默认走 CoinGecko（如 `BTCUSD`），股票基金默认走 Yahoo Finance，代码要带交易所后缀（如 A 股沪市 `600519.SS`、深市 `000001.SZ`）。
 
-```bash
-WONTON_BASE_DOMAIN=wonton.localhost
-```
+## 机器人（Bot）
 
-## 核心镜像
+Ghostfolio 自带 MCP 入口（实验性），本插件还没有把它接进云吞的 Bot：Ghostfolio 的 MCP 令牌要主人登录后在应用里创建（应用没有密码登录，插件在装的时候拿不到），而插件的工具入口要求令牌在装好时就绪。等底座支持"装好后再收集令牌"再接。
 
-检查和冒烟默认用套件里的核心镜像（`ghcr.io/wontonapp/wonton-core:main`）；要固定别的核心镜像，在仓库 Settings → Variables 设 `WONTON_CORE_IMAGE`，手动触发“检查”时填的 `core-image` 输入优先。
+不接 Bot 不影响网页使用：看持仓、记账都在网页里。
 
-## 更新开发套件
+## 已知限制
 
-```bash
-scripts/dev.sh kit-update
-```
-
-在从模板新建的插件仓库中更新套件；本仓库是套件源头，执行时只提示并退出。版本、可选引用和自定义脚本约定见[开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md#更新开发套件)。
-
-## 图标
-
-`icon.svg` 是本仓库原创线条图标，按本仓库 MIT 许可证分发，见 [NOTICE](NOTICE)。
+- 上游没有环境变量可以关闭注册：装好后建议主人进**管理控制台**（右上角头像 → 管理）把注册关掉。网页始终在云吞网关后面，默认只有主人打得开。

@@ -1,29 +1,23 @@
+# 云吞插件 pb-ghostfolio 的许可与声明
+
 图标
 ====
 
-`icon.svg` 为本仓库原创，按插件规范的线条风格手写，未用图片模型生成。从模板新建的插件换成自己的图标时，这里按实际情况重写。
+`icon.png` 使用 Ghostfolio 官方标志（上游仓库 `apps/client/src/assets/android-chrome-512x512.png`，原样使用，未改色、未变形）。
+
+Ghostfolio 名称和标志是 Ghostfolio 项目及其权利人的商标；本插件是独立维护的云吞插件包，不代表上游官方出品、合作或背书。
 
 许可证
 ------
 
-MIT License
+上游应用的许可证：AGPL-3.0-only，上游仓库 https://github.com/ghostfolio/ghostfolio 。
 
-Copyright (c) 2026 Wonton plugin authors
+本插件包的许可证见仓库的 LICENSE（MIT）。
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+第三方镜像逐个列许可：
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+| 镜像 | 许可证 |
+| --- | --- |
+| `ghostfolio/ghostfolio` | AGPL-3.0-only |
+| `postgres:15.15-alpine3.22` | PostgreSQL Licence |
+| `redis:8.4-alpine` | AGPL-3.0 / RSAL-2.0 / SSPL-1.0 三选一 |
