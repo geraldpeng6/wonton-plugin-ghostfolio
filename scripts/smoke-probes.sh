@@ -30,23 +30,23 @@
 SSO=oidc
 MCP=0
 
-web_assert() { grep -qi '<title[^>]*>Ghostfolio'; }   # OIDC 走完后落到应用页面（index.html 的标题）
+web_assert() { grep -qi '<title[^>]*>Ghostfolio'; }   # SPA 的 index.html 对任何路径都返回，标题即特征
 
 # ---------- 探针内部助手：只用套件保证的变量 ----------
 GF_JWT=""
 
 gf_token() { # 走完 OIDC：核心会话 → 应用 /api/auth/oidc → 核心登录页自动放行 → 回调 → 302 到 /<语言>/auth/<jwt>。
              # 同一进程缓存；输出 JWT，诊断走标准错误。
-  local jar base_core final jwt
-  jar="${SMOKE_JAR:-}" base_core="${SMOKE_BASE:-}"
+  local final jwt
   if [[ -z "$GF_JWT" ]]; then
-    [[ -n "$jar" && -n "$base_core" && -n "${SMOKE_TOKEN:-}" && -n "${SMOKE_WEB_URL:-}" ]] ||
+    [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_BASE:-}" && -n "${SMOKE_TOKEN:-}" && -n "${SMOKE_WEB_URL:-}" ]] ||
       { echo "缺冒烟变量：SMOKE_JAR/SMOKE_BASE/SMOKE_TOKEN/SMOKE_WEB_URL" >&2; return 1; }
-    # 核心会话和应用会话都补进 jar：-b 保留已有的 cookie（只写 -c 会抹掉别的域的会话）。
-    curl -sS --noproxy '*' -o /dev/null -b "$jar" -c "$jar" \
-      --data-urlencode "token=$SMOKE_TOKEN" "$base_core/_wonton/login" ||
-      { echo "主人令牌登录不了核心" >&2; return 1; }
-    final="$(curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' \
+    # 核心会话：token 的 POST /_wonton/login 返回 303 且不发会话 cookie（会话在核心登录表单提交后才有，
+    # 2026-11-07 e2e 实测，同 karakeep 探针的结论），裸 POST 建不上会话；走 dev.sh 的表单登录回退，
+    # 整条登录链（含核心登录页的 JS 自动表单）由 dweb --sso 跟完。失败不掩盖，下一步的 OIDC 链如实报。
+    dweb --sso / >/dev/null || true
+    # Ghostfolio 的登录态不是 cookie，是回调最后一跳地址里的 JWT（/<语言>/auth/<jwt>），再走一遍链取它。
+    final="$(curl -sS --noproxy '*' -o /dev/null -L -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Accept: text/html' \
       -w '%{url_effective}' "$SMOKE_WEB_URL")" || { echo "OIDC 登录链请求失败" >&2; return 1; }
     jwt="${final##*/auth/}"
     [[ -n "$jwt" && "$jwt" != "$final" ]] ||
