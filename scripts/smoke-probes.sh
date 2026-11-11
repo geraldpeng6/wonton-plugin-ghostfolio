@@ -4,8 +4,11 @@
 # 变量别叫 state：shellcheck 把这份文件连着 probes.sh 一起分析，probes.sh 自己也读一个 dev.sh 提供的 state；
 # 子壳体函数（fn() ( … )）里给 state 赋值，SC2031 就报在 probes.sh 上，CI 红。
 #
-# 变量：SMOKE_WEB_URL 是应用的网页入口（套件已去尾斜杠，但可能带路径，比如 SSO 登录页）；
-#       拼 API 路径用 SMOKE_WEB_ORIGIN（只有 scheme://host:port，入口的路径不掺进来），别直接接在 SMOKE_WEB_URL 后面。
+# 变量：两套冒烟环境（dev.sh smoke、正式 e2e 套件）都给的只有 SMOKE_STATE、SMOKE_JAR、SMOKE_WEB_URL、
+#       SMOKE_OWNER、SMOKE_BASE、SMOKE_TOKEN、SMOKE_INSTANCE 和 web_get、dweb。SMOKE_WEB_URL 的含义两边不同
+#       （dev.sh smoke 是带路径的网页入口，正式套件剥成只有 origin），拼 API 和挑本插件都用 _gf_origin 取的
+#       origin；网页入口从核心的插件列表查（web_url 带清单的入口路径），不依赖 SMOKE_WEB_ORIGIN/SMOKE_PLUGIN_ID
+#       （正式套件的钩子约定里没有这两个）。
 #
 # 页面：web_assert 从标准输入读页面，命中的确是应用的真实页面时返回 0。
 # 身份：identity_check 只证明身份：用应用自己的"当前用户"接口断言认出的是用户管理员，不碰应用里的数据。
@@ -32,25 +35,39 @@ MCP=0
 
 web_assert() { grep -qi '<title[^>]*>Ghostfolio'; }   # SPA 的 index.html 对任何路径都返回，标题即特征
 
-# ---------- 探针内部助手：只用套件保证的变量 ----------
+# ---------- 探针内部助手：只用两套冒烟环境都给的变量 ----------
 GF_JWT=""
 
-gf_token() { # 走完 OIDC：核心会话 → 应用 /api/auth/oidc → 核心登录页自动放行 → 回调 → 302 到 /<语言>/auth/<jwt>。
+_gf_origin() { # SMOKE_WEB_URL 两边含义不同（一个带入口路径、一个只有 origin），拼 API 前取 origin
+  local u="${SMOKE_WEB_URL%%\?*}" rest="${SMOKE_WEB_URL#*://}"
+  printf '%s://%s' "${u%%://*}" "${rest%%/*}"
+}
+
+gf_token() { # 登进核心 → 应用 /api/auth/oidc → 核心登录页自动放行 → 回调 → 302 到 /<语言>/auth/<jwt>。
              # 同一进程缓存；输出 JWT，诊断走标准错误。
-  local final jwt
+  local entry final jwt plugins
   if [[ -z "$GF_JWT" ]]; then
     [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_BASE:-}" && -n "${SMOKE_TOKEN:-}" && -n "${SMOKE_WEB_URL:-}" ]] ||
       { echo "缺冒烟变量：SMOKE_JAR/SMOKE_BASE/SMOKE_TOKEN/SMOKE_WEB_URL" >&2; return 1; }
-    # 核心会话：token 的 POST /_wonton/login 返回 303 且不发会话 cookie（会话在核心登录表单提交后才有，
-    # 2026-11-07 e2e 实测，同 karakeep 探针的结论），裸 POST 建不上会话；走 dev.sh 的表单登录回退，
-    # 整条登录链（含核心登录页的 JS 自动表单）由 dweb --sso 跟完。失败不掩盖，下一步的 OIDC 链如实报。
-    dweb --sso / >/dev/null || true
-    # Ghostfolio 的登录态不是 cookie，是回调最后一跳地址里的 JWT（/<语言>/auth/<jwt>），再走一遍链取它。
-    final="$(curl -sS --noproxy '*' -o /dev/null -L -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Accept: text/html' \
-      -w '%{url_effective}' "$SMOKE_WEB_URL")" || { echo "OIDC 登录链请求失败" >&2; return 1; }
+    # 核心会话补进 jar：-b 保留已有 cookie（只写 -c 会把 jar 里别的域的会话抹掉）。
+    curl -sS --noproxy '*' --max-time 120 -o /dev/null -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
+      --data-urlencode "token=${SMOKE_TOKEN}" "$SMOKE_BASE/_wonton/login" ||
+      { echo "主人令牌登录不了核心" >&2; return 1; }
+    # 网页入口从核心查：web_url 带清单的入口路径（如 /api/auth/oidc），链必须从入口出发——SMOKE_WEB_URL 在
+    # 正式套件里只有 origin，从它出发只会落到应用根（/ → /<语言>），OIDC 根本不走。按 origin 前缀挑本插件。
+    plugins="$(curl -sS --noproxy '*' --max-time 120 -H "Authorization: Bearer ${SMOKE_TOKEN}" \
+      "$SMOKE_BASE/_wonton/api/plugins")" || { echo "列不出插件" >&2; return 1; }
+    entry="$(jq -r --arg o "$(_gf_origin)" \
+      '[.plugins[] | .web_url // empty] | map(select(startswith($o))) | first // empty' <<<"$plugins")" ||
+      { echo "读不出网页入口" >&2; return 1; }
+    [[ -n "$entry" ]] || { echo "核心没给本插件的网页入口" >&2; return 1; }
+    # Ghostfolio 的登录态不是 cookie，是回调最后一跳地址里的 JWT（/<语言>/auth/<jwt>），走一遍链取它。
+    final="$(curl -sS --noproxy '*' --max-time 120 -o /dev/null -L -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
+      -H 'Accept: text/html' -w '%{url_effective}' "$entry")" ||
+      { echo "OIDC 登录链请求失败" >&2; return 1; }
     jwt="${final##*/auth/}"
     [[ -n "$jwt" && "$jwt" != "$final" ]] ||
-      { echo "登录没拿到 JWT（最后一跳是 $final；跳到 /auth 说明 OIDC 失败，看应用日志）" >&2; return 1; }
+      { echo "登录没拿到 JWT（入口 $entry，最后一跳是 $final；跳到 /auth 说明 OIDC 失败，看应用日志）" >&2; return 1; }
     GF_JWT="$jwt"
   fi
   printf '%s' "$GF_JWT"
@@ -59,11 +76,11 @@ gf_token() { # 走完 OIDC：核心会话 → 应用 /api/auth/oidc → 核心�
 gf_api() { # <方法> <路径> [JSON 正文]：带应用 JWT 经网关调应用接口，输出响应。
   local method="$1" path="$2" body="${3:-}" jwt args=()
   jwt="$(gf_token)" || return 1
-  args=(-sS --noproxy '*' -b "$SMOKE_JAR" -H "Authorization: Bearer $jwt" -X "$method")
+  args=(-sS --noproxy '*' --max-time 120 -b "$SMOKE_JAR" -H "Authorization: Bearer $jwt" -X "$method")
   if [[ -n "$body" ]]; then
     args+=(-H 'Content-Type: application/json' -d "$body")
   fi
-  curl "${args[@]}" "$SMOKE_WEB_ORIGIN$path"
+  curl "${args[@]}" "$(_gf_origin)$path"
 }
 
 identity_check() { # 应用认出的是主人本人：这个 JWT 调得动"当前用户"接口，且应用里只有这一个用户——
