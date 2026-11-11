@@ -1,78 +1,135 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件。
+# Ghostfolio：股票、基金和加密货币的持仓与收益跟踪。
+# 上游官方镜像（AGPL-3.0），三件套照上游 docker/docker-compose.yml（应用 + Postgres + Redis）。
+# 登录全走云吞的身份提供方（上游 OIDC）。
+name: ghostfolio
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+  ghostfolio:
+    image: ghostfolio/ghostfolio:3.99.0@sha256:6aeba7b9df7a18bc4f39810444b1f18af012a7fe323cec20640b7c28661fc47c
+    init: true
+    stop_grace_period: 1m
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      TZ: ${TZ}
+      # 浏览器的公开地址由核心注入：OIDC 的默认回调和登录后的跳转都按它拼
+      # （auth.module.ts、auth.controller.ts）。缺了 OIDC 直接打不开。
+      ROOT_URL: ${WONTON_APP_URL}
+      # 登录只认核心的身份提供方：issuer 是核心在插件网络里的地址，端点从发现文档自动取，
+      # 连不上时应用启动直接失败（auth.module.ts 在初始化时拉发现文档），不装作正常。
+      ENABLE_FEATURE_AUTH_OIDC: "true"
+      OIDC_ISSUER: ${WONTON_OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${WONTON_OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${WONTON_OIDC_CLIENT_SECRET}
+      DATABASE_URL: postgresql://ghostfolio:${WONTON_SECRET_POSTGRES_PASSWORD}@postgres:5432/ghostfolio?connect_timeout=300
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${WONTON_SECRET_REDIS_PASSWORD}
+      # 密钥由核心生成注入；缺了应用启动失败（configuration.service.ts 必填项）。
+      ACCESS_TOKEN_SALT: ${WONTON_SECRET_ACCESS_TOKEN_SALT}
+      JWT_SECRET_KEY: ${WONTON_SECRET_JWT_SECRET_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # 端点查 Postgres 和 Redis，都可用才返回 200（health.controller.ts）；镜像自带 curl。
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3333/api/v1/health"]
       interval: 30s
       timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      retries: 5
+      start_period: 120s
+      start_interval: 2s
 
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+  postgres:
+    image: postgres:15.15-alpine3.22@sha256:613492d5d36cd94d166ea95abd0616e76096db387a1dcd7577d9dedf204dfc98
+    environment:
+      POSTGRES_DB: ghostfolio
+      POSTGRES_USER: ghostfolio
+      POSTGRES_PASSWORD: ${WONTON_SECRET_POSTGRES_PASSWORD}
+    volumes:
+      # 全部业务数据（用户、持仓、汇率缓存）都在 Postgres；删数据 = 删这个目录。
+      - ${WONTON_APP_DATA}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d \"$$POSTGRES_DB\" -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 2s
+
+  redis:
+    image: redis:8.4-alpine@sha256:71885d8cc6e42f2bc0aa2eb853bfc4be200b5108a46ac50e117ae1df0531fb80
+    # 上游 compose 同款：redis 镜像的用户。
+    user: "999:1000"
+    environment:
+      REDIS_PASSWORD: ${WONTON_SECRET_REDIS_PASSWORD}
+    command:
+      - /bin/sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_PASSWORD"
+    # 纯缓存（上游不挂卷，重启即失），不占数据目录。
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --pass \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      start_interval: 2s
 
 x-wonton:
-  spec: "0.6"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.11"
+  id: io.ghostfolio.ghostfolio
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
-  icon: icon.svg
+  title: { zh: 投资记账（Ghostfolio）, en: Ghostfolio }
+  description:
+    zh: 像证券 App 的收益页，把股票、基金和加密货币的买卖记进来，随时看总资产和涨跌盈亏
+    en: A portfolio tracker for stocks, funds and crypto, with total value and gains at a glance
+  icon: icon.png
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  screenshots: [screenshots/home.png, screenshots/holdings.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://ghostfol.io
+  license: AGPL-3.0-only
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [记账, 投资]
+    en: [Finance, Investing]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      记下股票、基金和加密货币的买卖，Ghostfolio 帮你盯着：总资产、每天的涨跌、各持仓的盈亏和占比，一眼看清。
+
+      登录用云吞的账号，打开就是自己的持仓，不用再注册。行情价自动更新（要访问外网），也支持手动记账。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Record your stocks, funds and crypto, and Ghostfolio keeps watch: total assets, daily moves, and the gains, losses and weightings of every holding at a glance.
+
+      Sign-in uses your Wonton account; the app opens straight into your portfolio. Market prices update on their own (needs internet access); manual entries are supported too.
+  release_notes:
+    zh: 首个版本：Ghostfolio 3.99.0，登录走云吞账号，行情经云吞的出网代理。
+    en: "Initial release: Ghostfolio 3.99.0, with Wonton sign-in and market data through the egress proxy."
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放进侧边栏“我的应用”的页面，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#应用页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：从状态栏下沿开始，页面不用管安全区。
-      # 想让内容从状态栏后面滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出系统安全区的位置。
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+    service: ghostfolio
+    port: 3333
+    # 打开直跳 OIDC 登录，不落在应用的登录页。
+    path: /api/auth/oidc
+    sso: oidc
+    oidc:
+      redirect_paths: [/api/auth/oidc/callback]
+      # 上游的 OIDC 客户端在令牌端点用 client_secret_post 出示密钥（passport-openidconnect 固定行为，
+      # 上游没有配置项），核心登记的客户端要按同样的方式收密钥。
+      token_endpoint_auth_method: client_secret_post
+  secrets:
+    access_token_salt:
+      generate: { bytes: 32 }
+    jwt_secret_key:
+      generate: { bytes: 32 }
+    postgres_password:
+      generate: { bytes: 32 }
+    redis_password:
+      generate: { bytes: 32 }
+  permissions:
+    # 行情价（Yahoo Finance、CoinGecko）从容器里访问外网；插件内部互访核心已放进 NO_PROXY。
+    - network.egress
+  # 三个镜像都有 amd64 和 arm64（docker buildx imagetools inspect 核对）。
+  # 上游没写最低内存：本机实测整栈约 450M（应用 419M、Postgres 21M、Redis 5M，浏览过页面后取值），取 512M。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 512M
