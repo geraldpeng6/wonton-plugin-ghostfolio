@@ -40,7 +40,7 @@ services:
       start_interval: 2s
 
   postgres:
-    image: postgres:15.15-alpine3.22@sha256:613492d5d36cd94d166ea95abd0616e76096db387a1dcd7577d9dedf204dfc98
+    image: postgres:18.0-alpine3.22@sha256:48c8ad3a7284b82be4482a52076d47d879fd6fb084a1cbfccbd551f9331b0e40
     environment:
       POSTGRES_DB: ghostfolio
       POSTGRES_USER: ghostfolio
